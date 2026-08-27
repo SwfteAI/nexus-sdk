@@ -1,0 +1,109 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+# DISTRIBUTION name, not the import name. `import nexus` is unchanged and always will be — the two
+# are allowed to differ and routinely do (pillow/PIL, beautifulsoup4/bs4, attrs/attr).
+#
+# It is not `nexus-sdk` because that name on PyPI belongs to somebody else: Blue Brain's
+# `nexus-python-sdk` (github.com/BlueBrain/nexus-python-sdk), published 0.1.0 through 0.3.2. PyPI
+# names are first-come and never transferred on request, so this is not a version clash that a
+# bump could clear — an upload under `nexus-sdk` is rejected outright, and no amount of local
+# version bumping changes that. Discovered 2026-08-26 while measuring release readiness; had it
+# been discovered by a failing `twine upload` instead, the failure would have been read as an
+# auth problem.
+name = "swfte-nexus-sdk"
+version = "0.1.0"
+description = "Embedded agent observability for Python services — zero required dependencies."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Swfte AI" }]
+keywords = ["observability", "agents", "llm", "telemetry", "tracing"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Monitoring",
+]
+
+# The core ring has ZERO required dependencies, and this empty list is a product decision rather
+# than a minimalist affectation. An observability SDK is installed into somebody else's resolved
+# dependency graph; every requirement we add is a version range that can conflict with theirs, and
+# a conflict at install time is where adoption ends — before any of this code runs. `wrapt` and
+# dd-trace-py's import machinery are vendored under `nexus/vendor/` for precisely this reason.
+dependencies = []
+
+[project.optional-dependencies]
+# Declared so the shape is fixed; not implemented in M0-M1. See src/nexus/otel/__init__.py for why
+# the gRPC exporter is deliberately absent (C extension on the egress path of a pre-fork server).
+otel = [
+  "opentelemetry-api>=1.20",
+  "opentelemetry-sdk>=1.20",
+  "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
+# Provider/framework adapters (WP-5). Empty today: adapters patch on import and require nothing at
+# install time, so this extra exists to name the ring, not to pull libraries the customer already has.
+integrations = []
+dev = [
+  "pytest>=8.0",
+  "pytest-timeout>=2.3",
+]
+
+[project.scripts]
+nexus-run = "nexus.cli:main"
+
+[project.urls]
+# Was `github.com/swfte/nexus-sdk`, which has never existed — wrong org (`swfte` vs `SwfteAI`) and
+# no such repository under either. A published package links every PyPI visitor straight to a 404,
+# and the project page is usually the first thing someone checks before installing something that
+# will run inside their production process.
+Homepage = "https://github.com/SwfteAI/nexus-sdk"
+Source = "https://github.com/SwfteAI/nexus-sdk"
+Issues = "https://github.com/SwfteAI/nexus-sdk/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nexus"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"LICENSE" = "nexus/LICENSE"
+"NOTICE" = "nexus/NOTICE"
+
+# Vendored trees carry their upstream licence texts. These are not documentation: shipping BSD-2
+# (wrapt) or Apache-2.0 (dd-trace-py) code in a wheel without the licence text is a licence
+# violation, and tests/test_vendor_attribution.py fails the build if a vendor directory lacks one.
+[tool.hatch.build]
+artifacts = [
+  "src/nexus/vendor/**/LICENSE*",
+  "src/nexus/vendor/**/NOTICE*",
+]
+
+# `docs/` is NOT shipped, and the omission is the point.
+#
+# This list is an ALLOWLIST, so a file added to the repository tomorrow is absent from the sdist
+# until somebody names it here. That direction matters more than the contents: a denylist fails
+# open — the new file ships and nobody notices — while an allowlist fails closed, and the cost of
+# failing closed is a missing file rather than a disclosure.
+#
+# What lives in `docs/` is engineering material written for people working *on* this package. It
+# cites internal design documents that are not distributed, so a reader of the sdist would get
+# dangling references even where the content itself is unremarkable. A published sdist cannot be
+# recalled — PyPI keeps the file and mirrors copy it — so a name added to this list is added
+# permanently, and the bar for adding one is that a customer is worse off without it.
+#
+# `tests/` IS shipped, deliberately: distribution packagers build from the sdist and run the suite,
+# and a security fix nobody can verify downstream is worth less than one they can.
+#
+# Customer documentation is README.md, which ships as `readme` above.
+[tool.hatch.build.targets.sdist]
+include = ["src/nexus", "tests", "LICENSE", "NOTICE", "README.md", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --timeout=120"
+filterwarnings = ["ignore::DeprecationWarning"]
