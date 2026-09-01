@@ -143,6 +143,19 @@ class Client:
 
     @guard("client.emit_health")
     def emit_health(self, checkpoint: str) -> None:
+        """One, and only one, closing record per process.
+
+        ``shutdown()`` and the ``atexit`` hook both route here, and an explicit ``shutdown()``
+        therefore used to produce two ``stop`` records — with the second one counting the first,
+        so the queue-depth series stepped up at the end of every cleanly-closed process and read
+        like a restart loop. Nothing failed and no test looked, which is why the cross-SDK
+        conformance suite found it rather than either test suite: the Node SDK latches this and
+        emitted one, this one emitted two, and the diff was a bare count.
+        """
+        if checkpoint == "stop":
+            if getattr(self, "_stop_emitted", False):
+                return
+            self._stop_emitted = True
         self.emit(contract.pipeline_health(
             self.session_id, self.cfg, instance_id=self.instance_id,
             counters=_counters.snapshot(), queue_depth=self.transport.depth(),

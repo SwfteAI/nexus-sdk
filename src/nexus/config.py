@@ -446,6 +446,11 @@ def _health_interval(raw: t.Any) -> float:
 
 def resolve(**kw: t.Any) -> Config:
     """Build the effective config. ``kw`` are the explicit ``nexus.init()`` arguments."""
+    # Deferred, and it has to be: ``contract`` imports ``Config`` from this module, so a top-level
+    # import here would be a cycle. By the time anything calls ``resolve()`` this module is fully
+    # initialised, so the cycle does not exist at call time.
+    from .contract import label
+
     fileconf = _file_overrides()
 
     def pick(name: str, envname: str, default: t.Any, cast: t.Callable[[str], t.Any] = str) -> t.Any:
@@ -509,11 +514,21 @@ def resolve(**kw: t.Any) -> Config:
         # -- provenance (§6.1). ``.get`` with no default: a field we did not read is ``None``,
         # which the dataclass declares and the builders drop before the wire. Nothing here has a
         # fallback, and adding one would silence the shadow-deploy alarm permanently.
-        application=prov.values.get("application"),
-        repo=prov.values.get("repo"),
-        commit=prov.values.get("commit"),
-        branch=prov.values.get("branch"),
-        deployment_id=prov.values.get("deployment_id"),
+        #
+        # Bounded HERE rather than in each builder, for the reason ``service``/``env``/``version``
+        # two lines up already are: these five are dimensions that ride the base envelope, so an
+        # unbounded ``commit`` is not one oversized field, it is one oversized field multiplied by
+        # every row this process ever emits. Bounding at the point of resolution also means no
+        # builder can forget, and there is exactly one place to read the bound off.
+        #
+        # ``contract.label`` and not ``str(...)[:n]``: a value that is only whitespace becomes
+        # ``None`` rather than ``""``, so "we read nothing" and "we read a blank" stay different
+        # facts all the way to the wire, which is the whole point of dropping ``None`` keys.
+        application=label(prov.values.get("application"), 128),
+        repo=label(prov.values.get("repo"), 200),
+        commit=label(prov.values.get("commit"), 128),
+        branch=label(prov.values.get("branch"), 128),
+        deployment_id=label(prov.values.get("deployment_id"), 128),
         provenance_source=prov.provenance_source,
         provenance_sources=dict(prov.sources),
         tier=tier,

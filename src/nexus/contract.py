@@ -109,6 +109,43 @@ def est_tokens(text: str) -> int:
     return (len(text or "") + 3) // 4
 
 
+def label(v: t.Any, max_len: int = 64) -> t.Optional[str]:
+    """A **dimension**: a low-cardinality string a consumer groups by. Bounded, never redacted.
+
+    These are the fields a rollup does ``GROUP BY`` on — ``goal_class``, ``model``, ``provider``,
+    ``kind``, ``error_class``, and the five provenance labels that ride the base envelope. They are
+    not content, so the tier ladder is the wrong instrument for them; what they need is a *length
+    bound*, and most of them had none.
+
+    The failure mode is **cardinality, not disclosure**, and that is exactly why it survived so
+    long: nothing errors, nothing leaks, no test goes red. The rollup and the cost report just
+    quietly degrade on the collector's side, where the customer cannot see it and we are the ones
+    paying for it. ``token_usage.model`` is the sharpest case — it is the primary group-by of every
+    cost rollup, so a per-request value fragments spend into one row per call and no per-model total
+    can be computed at all.
+
+    **What this does and does not fix.** Truncating to a bound stops a megabyte of prose becoming a
+    group-by key. It does *not* reduce the number of distinct values, which is the other half of
+    cardinality; capping that in-process would mean remembering every value ever seen, which is
+    itself unbounded memory, so it belongs to the collector. ``tests/test_dimensions.py`` asserts
+    that limit explicitly so the bound is not mistaken for a fix it is not.
+
+    Semantics are the Node SDK's ``label()`` in ``src/core.cjs``, character for character, and the
+    cross-SDK conformance suite checks that they still are:
+
+    * ``None`` stays ``None`` — ``base()`` then drops the key, so absent stays absent;
+    * the value is stringified rather than dropped, because ``goal_class=42`` is a caller mistake
+      and silently losing the label is a worse response to it than recording it;
+    * surrounding whitespace is stripped, and a value that was *only* whitespace becomes ``None``,
+      because ``"   "`` is not a cohort;
+    * the bound is applied last, so an ordinary label survives untouched.
+    """
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s[:max_len] if s else None
+
+
 def base(event_type: str, session_id: str, cfg: Config, *, epistemic_class: str,
          **extra: t.Any) -> dict:
     """Build the common envelope.
@@ -133,6 +170,33 @@ def base(event_type: str, session_id: str, cfg: Config, *, epistemic_class: str,
         "service_version": cfg.version,
         "sdk_version": _sdk_version(),
         "epistemic_class": epistemic_class,
+
+        # -- operate-plane join keys, on every event for the SAME reason the three above are ----
+        #
+        # These used to ride ``session`` alone, nested under ``provenance``, and this module's own
+        # docstring argued for that: six more keys on every event restating a fact that cannot
+        # change for the life of the process is bytes without information.
+        #
+        # That argument is wrong in the one way that matters, and it is wrong by this module's own
+        # precedent — ``service`` and ``env`` are here for exactly the reason it rejects. Events
+        # from one process outlive the session record that introduced them, and a consumer that has
+        # to look up a session to learn which application a row belongs to will eventually be
+        # handed a row whose session it never received. On a per-deploy cost view that is not a
+        # degraded answer, it is no answer: the rows are there and cannot be attributed.
+        #
+        # It was also a difference a customer could see. The Node SDK put these on the base
+        # envelope; this one did not, so identical instrumentation produced rows that could be
+        # grouped by commit from one SDK and not from the other, on one dashboard. Found by the
+        # cross-SDK conformance suite, which is the first thing that ever compared the two streams.
+        #
+        # Bounded at config resolution rather than here, so no builder can forget — ``config.py``.
+        # ``session`` renames ``repo`` to ``repo_slug`` on the way out; see that builder.
+        "application": cfg.application,
+        "repo": cfg.repo,
+        "commit": cfg.commit,
+        # Which variable the commit was read from, e.g. ``env:VERCEL_GIT_COMMIT_SHA``. The full
+        # per-field breakdown stays on ``session``; this is the one a reader needs beside every row.
+        "provenance_source": cfg.provenance_source,
     }
     e.update({k: v for k, v in extra.items() if v is not None})
     # Written LAST, after **extra, exactly as ``events.py:206`` does: the attach point is process
@@ -189,12 +253,37 @@ def session(session_id: str, cfg: Config, *, instance_id: str,
         ("branch", cfg.branch), ("deployment_id", cfg.deployment_id),
         ("source", cfg.provenance_source), ("sources", cfg.provenance_sources or None),
     ) if v is not None}
-    return base("session", session_id, cfg,
-                epistemic_class=EPISTEMIC_BEHAVIOR,
-                terminal_id=instance_id, tool="sdk",
-                privacy_tier=cfg.tier, runtime=runtime,
-                pid=os.getpid(),
-                provenance=prov or None)
+    e = base("session", session_id, cfg,
+             epistemic_class=EPISTEMIC_BEHAVIOR,
+             terminal_id=instance_id, tool="sdk",
+             privacy_tier=cfg.tier, runtime=runtime,
+             pid=os.getpid(),
+             # Flattened beside the nested map, matching the Node SDK. Redundant with
+             # ``provenance`` and deliberately so: they are the two provenance fields a reader most
+             # often wants without walking into a sub-object, and the alternative was two SDKs
+             # writing the same session record with different key sets.
+             branch=cfg.branch,
+             platform_deployment_id=cfg.deployment_id,
+             provenance=prov or None)
+
+    # ── a field-name collision between two producers, resolved by moving ours ────────────────
+    #
+    # ``base()`` now writes the provenance repo slug (``github.com/acme/portal``) onto every event
+    # as a string. On ``session`` that lands on top of a key the OTHER producer already owns and
+    # means something else by: ``nexus_devtools/events.py:session`` takes ``repo: Optional[dict]``
+    # — a local repository descriptor holding an absolute ``root`` — and
+    # ``contract/events.v1.json`` declares ``session.repo`` as ``{"type": "object"}`` accordingly.
+    # Four other event types declare ``repo`` as a string; ``session`` is the only one that does
+    # not.
+    #
+    # Nothing rejects a string there — the collector validates the schema major, not per-field
+    # types — so the damage would be a reader doing ``session.repo["root"]`` and getting a
+    # ``TypeError`` for exactly the rows that came from production. Renamed rather than dropped:
+    # the slug is a real operate-plane join key and ``session`` is where a reader looks for it.
+    # The Node SDK reached this conclusion first and spells it the same way.
+    if "repo" in e:
+        e["repo_slug"] = e.pop("repo")
+    return e
 
 
 def agent_run(session_id: str, cfg: Config, *, run_id: str, name: str, phase: str,
@@ -219,8 +308,9 @@ def agent_run(session_id: str, cfg: Config, *, run_id: str, name: str, phase: st
     """
     return base("agent_run", session_id, cfg,
                 epistemic_class=EPISTEMIC_BEHAVIOR,
-                run_id=run_id, name=str(name)[:128], phase=phase,
-                goal_class=goal_class, duration_ms=duration_ms, actions=actions,
+                run_id=run_id, name=label(name, 128), phase=phase,
+                goal_class=label(goal_class, 64), duration_ms=duration_ms,
+                actions=actions,
                 incomplete=incomplete or None,
                 **tiered_text("error", error, cfg.tier, full_limit=256, preview_limit=256))
 
@@ -249,7 +339,7 @@ def tool_action(session_id: str, cfg: Config, *, tool_name: str, action: str,
     """
     return base("tool_action", session_id, cfg,
                 epistemic_class=EPISTEMIC_BEHAVIOR,
-                tool_name=str(tool_name)[:64], action=str(action)[:64],
+                tool_name=label(tool_name, 64), action=label(action, 64),
                 blocked=blocked,
                 duration_ms=duration_ms, caused_by_prompt_id=run_id,
                 effect=effect or None,
@@ -278,12 +368,37 @@ def token_usage(session_id: str, cfg: Config, *, model: str,
     ``attempts`` records HTTP attempts for one logical call. The vendor clients retry internally,
     so a naive wrapper bills a flaky network as N calls (case 2.14). One usage record, N attempts.
     """
+    # -- cost, computed here when the caller did not supply one ---------------------------------
+    #
+    # It used to be a parameter and nothing else, so ``cost_usd`` was populated by the OTel bridge
+    # and the streams integration and was simply absent from every ``run.usage()`` call — the one
+    # path a customer instrumenting their own service actually uses. The Node SDK computes it at
+    # this layer, so the same explicit instrumentation produced a priced row from one SDK and an
+    # unpriced row from the other, into the same cost rollup. That is not a rounding difference;
+    # it is a service whose spend reads as zero because of which SDK it installed.
+    #
+    # Same rate card, same function, one layer down. ``scripts/pricing-parity.mjs`` already checks
+    # the arithmetic against the Node port differentially (264 assertions); this only changes
+    # *where* it is called. A caller-supplied figure still wins and is stamped ``provider`` rather
+    # than ``usage``, because a number the provider billed is evidence and a number we derived is
+    # an inference, and a reconciliation against an invoice has to be able to tell them apart.
+    if cost_usd is None:
+        from .integrations import pricing
+        cost_usd = pricing.cost_from_tokens(
+            model, input_tokens=input_tokens, output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+        ) if model else None
+        cost_source = pricing.SOURCE_USAGE if cost_usd is not None else None
+    elif not cost_source:
+        from .integrations import pricing
+        cost_source = pricing.SOURCE_PROVIDER
+
     return base("token_usage", session_id, cfg,
                 epistemic_class=EPISTEMIC_BEHAVIOR,
-                model=model, provider=provider,
+                model=label(model, 128), provider=label(provider, 64),
                 input_tokens=int(input_tokens or 0), output_tokens=int(output_tokens or 0),
                 cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
-                cost_usd=cost_usd, cost_source=cost_source,
+                cost_usd=cost_usd, cost_source=label(cost_source, 32),
                 caused_by_prompt_id=run_id,
                 attempts=attempts if attempts != 1 else None,
                 incomplete=incomplete or None)
@@ -304,8 +419,8 @@ def turn_outcome(session_id: str, cfg: Config, *, run_id: t.Optional[str], outco
         verified = True
     return base("turn_outcome", session_id, cfg,
                 epistemic_class=EPISTEMIC_BEHAVIOR,
-                prompt_id=run_id, outcome=str(outcome)[:64],
-                verified=verified, verified_by=(str(verified_by)[:64] if verified_by else None),
+                prompt_id=run_id, outcome=label(outcome, 64),
+                verified=verified, verified_by=label(verified_by, 64),
                 actions=actions, blocked=blocked, partial=partial or None)
 
 
@@ -409,10 +524,12 @@ def deployment(session_id: str, cfg: Config, *, deployment_id: str, env: str,
     """
     return base("deployment", session_id, cfg,
                 epistemic_class=EPISTEMIC_BEHAVIOR,
-                deployment_id=deployment_id, env=env,
-                app_id=app_id, version=version, commit=commit, repo=repo,
+                deployment_id=label(deployment_id, 128), env=label(env, 64),
+                app_id=label(app_id, 128), version=label(version, 128),
+                commit=label(commit, 128), repo=label(repo, 200),
                 started_ts=started_ts, finished_ts=finished_ts,
-                outcome=outcome, rollback_of=rollback_of, detected_by=detected_by,
+                outcome=label(outcome, 32), rollback_of=label(rollback_of, 128),
+                detected_by=detected_by,
                 **tiered_text("actor", actor, cfg.tier, full_limit=128, preview_limit=128))
 
 
@@ -437,7 +554,8 @@ def service_health(session_id: str, cfg: Config, *, service: str,
     """
     return base("service_health", session_id, cfg,
                 epistemic_class=EPISTEMIC_BEHAVIOR,
-                service=service, app_id=app_id, env=env,
+                service=label(service, 128), app_id=label(app_id, 128),
+                env=label(env, 64),
                 window_from=window_from, window_to=window_to,
                 requests=requests, errors=errors,
                 p50_ms=p50_ms, p95_ms=p95_ms, p99_ms=p99_ms, saturation=saturation,
@@ -481,11 +599,13 @@ def integration_probe(session_id: str, cfg: Config, *, integration: str, observe
     """
     e = base("integration_probe", session_id, cfg,
              epistemic_class=EPISTEMIC_BEHAVIOR,
-             integration=integration, observed_ts=observed_ts,
-             app_id=app_id, service=service, kind=kind,
+             integration=label(integration, 128), observed_ts=observed_ts,
+             app_id=label(app_id, 128), service=label(service, 128),
+             kind=label(kind, 64),
              integration_up=integration_up, auth_ok=auth_ok, latency_ms=latency_ms,
-             last_data_ts=last_data_ts, rows=rows, schema_fingerprint=schema_fingerprint,
-             error_class=error_class, detected_by=detected_by)
+             last_data_ts=last_data_ts, rows=rows,
+             schema_fingerprint=label(schema_fingerprint, 64),
+             error_class=label(error_class, 64), detected_by=detected_by)
     # Shape at every tier — content-free, so repeated failures can be counted and "the same error
     # as yesterday" answered, without the text ever leaving the machine. Hand-rolled here until the
     # tier ladder landed; now the same ``tiered_text`` the other free-text fields use, with the

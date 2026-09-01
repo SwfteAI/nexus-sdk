@@ -191,6 +191,26 @@ Provider auto-instrumentation (WP-5), policy enforcement (WP-6), and the Node SD
 exist for all three — `nexus/integrations/`, `nexus/policy/`, `nexus/otel/` — and are documented
 where they sit. None is implemented, and none is stubbed in a way that pretends otherwise.
 
+## The Node SDK, and staying identical to it
+
+`@swfte/nexus-sdk` (Node) instruments the same ledger, and a service written in either language has
+to be indistinguishable on the dashboard except for the language — any difference a customer can see
+is a defect, not a language quirk.
+
+That is checked rather than asserted. `nexus-sdk-node/conformance/` runs **one scripted scenario
+through both SDKs** — two interpreters of a single `scenario.json`, both posting to a stub collector
+that speaks the real ingest contract — and diffs the emitted event streams field by field, at every
+privacy tier, against each other and against the 51 `$defs` of `contract/events.v1.json`. It is
+wired into a `cross-sdk` job in **this** repository's CI as well as that one, because an instrument
+that guards one direction guards nothing: the drift simply lands in whichever repository has no job
+for it. `nexus-sdk-node/PARITY.md` §9 describes what it covers, and §3b lists every difference that
+deliberately remains, with the reason for each.
+
+Where the two are allowed to differ, they differ in *interpretation of a caller's argument* rather
+than on the wire — a bare-number watermark is epoch seconds here (`time.time()`) and epoch
+milliseconds there (`Date.now()`), because picking one would make the other language's idiomatic
+call wrong.
+
 ## Licence
 
 Apache-2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).

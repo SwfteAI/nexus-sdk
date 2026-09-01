@@ -64,6 +64,51 @@ jobs:
           path: overhead-latest.json
           if-no-files-found: warn
 
+  cross-sdk:
+    # The cross-SDK conformance suite lives in the Node repository (`conformance/`), and it runs
+    # from BOTH sides deliberately. It is one scripted scenario executed through both SDKs, with
+    # the emitted event streams diffed field by field and validated against the contract — so a
+    # change here that moves a wire shape away from the Node SDK's has to fail *this* build, not
+    # only the other one. An instrument that guards one direction guards nothing: the drift would
+    # simply land in whichever repository has no job for it.
+    #
+    # Skips loudly rather than silently when a sibling repository is unavailable, matching how the
+    # Node side handles the same problem.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: SwfteAI/nexus-sdk-node
+          path: .nexus-sdk-node
+          token: ${{ secrets.DEVTOOLS_READ_TOKEN }}
+        continue-on-error: true
+      - uses: actions/checkout@v4
+        with:
+          repository: SwfteAI/nexus-devtools
+          path: .nexus-devtools
+          token: ${{ secrets.DEVTOOLS_READ_TOKEN }}
+        continue-on-error: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Diff the two SDKs' emitted event streams
+        run: |
+          NODE_SDK="$PWD/.nexus-sdk-node"
+          CONTRACT="$PWD/.nexus-devtools/contract/events.v1.json"
+          if [ ! -f "$NODE_SDK/conformance/run.mjs" ] || [ ! -f "$CONTRACT" ]; then
+            echo "::warning::the Node SDK or the contract was not available; cross-SDK conformance did not run"
+            exit 0
+          fi
+          # The suite drives this checkout through `$NEXUS_PY_SDK/.venv/bin/python`.
+          python -m venv .venv
+          .venv/bin/python -m pip install -q -e .
+          cd "$NODE_SDK"
+          NEXUS_PY_SDK="$GITHUB_WORKSPACE" NEXUS_CONTRACT="$CONTRACT" node conformance/run.mjs
+
   lint:
     runs-on: ubuntu-latest
     steps:

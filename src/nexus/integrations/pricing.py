@@ -138,6 +138,27 @@ def cost_from_usage(model: str, usage: dict) -> t.Optional[float]:
         return None
 
 
+def cost_from_tokens(model: str, *, input_tokens: t.Any = None, output_tokens: t.Any = None,
+                     cache_read_tokens: t.Any = None,
+                     cache_write_tokens: t.Any = None) -> t.Optional[float]:
+    """The same calculation over the field names ``nexus.usage()`` uses, rather than the
+    transcript's.
+
+    A thin adapter on purpose. The rate card and the arithmetic stay in one function that is
+    diff-able against the Node SDK's ``pricing.cjs`` line by line; only the naming differs, and
+    naming is exactly what a port gets wrong quietly. ``cache_write_tokens`` maps to the flat
+    ``cache_creation_input_tokens`` and is therefore priced at the 5-minute rate — neither
+    ``usage()`` nor any bridge here exposes the 5m/1h split, and inventing one would be a guess
+    about a number the customer is billed for.
+    """
+    return cost_from_usage(model, {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_input_tokens": cache_read_tokens,
+        "cache_creation_input_tokens": cache_write_tokens,
+    })
+
+
 def _num(v: t.Any) -> float:
     try:
         return float(v or 0)
