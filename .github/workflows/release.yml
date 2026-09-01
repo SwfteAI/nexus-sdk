@@ -1,0 +1,110 @@
+name: release
+
+# MANUAL ONLY. Deliberately not on a tag push: a tag is a statement about the repository, and
+# publishing is a statement to the world that cannot be retracted — PyPI does not allow re-uploading
+# a version, even a deleted one. Somebody types the version they mean, and a mismatch aborts before
+# anything is built.
+#
+# RUNS ON THE SELF-HOSTED MAC. GitHub-hosted minutes are billed on private repos and this org's are
+# currently refused for non-payment; every job here would fail to start. Self-hosted minutes are
+# free and unmetered. If this repository is ever made public, these jobs move back to hosted runners
+# in the same change — a fork's pull request must never execute on the machine hosting the runner.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Actually upload to PyPI (leave off for a dry run that builds and checks)"
+        type: boolean
+        default: false
+      confirm_version:
+        description: "To publish, type the exact version (e.g. 0.1.0). A mismatch aborts."
+        type: string
+        default: ""
+      repository:
+        description: "Where to upload"
+        type: choice
+        options: ["pypi", "testpypi"]
+        default: "testpypi"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 45
+    environment: ${{ inputs.publish && 'pypi' || '' }}
+    permissions:
+      # TRUSTED PUBLISHING, not an API token. PyPI mints a short-lived credential from this
+      # workflow's OIDC identity, so there is no long-lived secret to store, leak or rotate — which
+      # matters more here than usual, since a token pasted into a chat window is exactly how this
+      # project has already lost one. Configure the publisher once at
+      # pypi.org/manage/project/swfte-nexus-sdk/settings/publishing: owner SwfteAI, repository
+      # nexus-sdk, workflow release.yml, environment pypi.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # `uv`, not actions/setup-python: that action installs into a system tool cache and needs root
+      # to do it, which a self-hosted runner running as an ordinary login account cannot give it
+      # (`sudo: a password is required`). uv keeps interpreters under the user's own data directory.
+      # `--seed` puts pip in the venv, which uv otherwise omits.
+      - name: Set up Python 3.12
+        run: |
+          uv python install 3.12
+          uv venv --seed --python 3.12 "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      # Before anything is built. A version that disagrees between the packaging metadata and the
+      # module is a wheel whose events name a different build than the wheel does, and `sdk_version`
+      # rides every event this SDK emits.
+      - name: The version is the same number everywhere
+        id: v
+        run: python scripts/check_versions.py >> "$GITHUB_OUTPUT"
+
+      - name: The typed version is the one you asked for
+        if: inputs.publish
+        env:
+          WANT: ${{ inputs.confirm_version }}
+          GOT: ${{ steps.v.outputs.version }}
+        run: |
+          if [ "$WANT" != "$GOT" ]; then
+            echo "::error::confirm_version is '$WANT' but this tree is '$GOT' — nothing published"
+            exit 1
+          fi
+
+      - name: Install test and build tooling
+        run: python -m pip install --upgrade pytest build twine
+
+      # The suite gates the upload rather than merely preceding it. A release whose tests were not
+      # run is a release nobody can describe afterwards.
+      - name: Test
+        run: python -m pytest tests/ -q --deselect tests/test_decision_latency.py::test_p99_decision_latency_is_under_the_published_cap
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Metadata is well-formed
+        run: python -m twine check dist/*
+
+      # Both artifacts, named, in the run summary — so what was uploaded is legible from the run
+      # itself rather than only from the registry afterwards.
+      - name: Provenance
+        run: |
+          {
+            echo "### swfte-nexus-sdk ${{ steps.v.outputs.version }}"
+            echo ""
+            echo "| artifact | bytes |"
+            echo "|---|---|"
+            for f in dist/*; do echo "| \`$(basename "$f")\` | $(wc -c < "$f") |"; done
+            echo ""
+            echo "Upload: **${{ inputs.publish && inputs.repository || 'dry run — nothing uploaded' }}**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload
+        if: inputs.publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ inputs.repository == 'testpypi' && 'https://test.pypi.org/legacy/' || '' }}

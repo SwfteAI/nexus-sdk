@@ -1,5 +1,12 @@
 name: ci
 
+# Runs on the self-hosted runner, not `ubuntu-latest`, because GitHub-hosted minutes are billed on
+# private repos and this org's are currently refused for non-payment — every job here was failing to
+# start, so this workflow has never actually run. Self-hosted minutes are free and unmetered.
+#
+# If this repository is ever made public, these jobs move back to hosted runners in the same change:
+# a pull request from a fork must never execute on the machine hosting the runner.
+
 on:
   push:
     branches: [master]
@@ -17,12 +24,18 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.10", "3.11", "3.12", "3.13"]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
+      # `uv`, not actions/setup-python: that action installs into a system tool cache and
+      # needs root to do it, which a self-hosted runner running as an ordinary login
+      # account cannot give it (`sudo: a password is required`). uv keeps interpreters
+      # under the user's own data directory. `--seed` puts pip in the venv.
+      - name: Set up Python ${{ matrix.python }}
+        run: |
+          uv python install ${{ matrix.python }}
+          uv venv --seed --python ${{ matrix.python }} "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - name: Install
         # No `-e .` and no requirements file: the core ring has zero dependencies and installing it
         # from the built wheel is the only way to notice if that ever stops being true.
@@ -45,12 +58,18 @@ jobs:
     # Separate job on a dedicated runner. The published numbers are only meaningful on a box that
     # is not simultaneously running three other test matrices; see docs/OVERHEAD.md for why the
     # wall-clock tail assertion self-disables when the machine turns out to be busy anyway.
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      # `uv`, not actions/setup-python: that action installs into a system tool cache and
+      # needs root to do it, which a self-hosted runner running as an ordinary login
+      # account cannot give it (`sudo: a password is required`). uv keeps interpreters
+      # under the user's own data directory. `--seed` puts pip in the venv.
+      - name: Set up Python "3.12"
+        run: |
+          uv python install "3.12"
+          uv venv --seed --python "3.12" "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - run: python -m pip install --upgrade pip pytest pytest-timeout
       - name: Measure and assert overhead
         run: python -m pytest tests/test_overhead.py -q -s --timeout=300
@@ -74,7 +93,7 @@ jobs:
     #
     # Skips loudly rather than silently when a sibling repository is unavailable, matching how the
     # Node side handles the same problem.
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -89,9 +108,15 @@ jobs:
           path: .nexus-devtools
           token: ${{ secrets.DEVTOOLS_READ_TOKEN }}
         continue-on-error: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      # `uv`, not actions/setup-python: that action installs into a system tool cache and
+      # needs root to do it, which a self-hosted runner running as an ordinary login
+      # account cannot give it (`sudo: a password is required`). uv keeps interpreters
+      # under the user's own data directory. `--seed` puts pip in the venv.
+      - name: Set up Python "3.12"
+        run: |
+          uv python install "3.12"
+          uv venv --seed --python "3.12" "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -110,12 +135,18 @@ jobs:
           NEXUS_PY_SDK="$GITHUB_WORKSPACE" NEXUS_CONTRACT="$CONTRACT" node conformance/run.mjs
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      # `uv`, not actions/setup-python: that action installs into a system tool cache and
+      # needs root to do it, which a self-hosted runner running as an ordinary login
+      # account cannot give it (`sudo: a password is required`). uv keeps interpreters
+      # under the user's own data directory. `--seed` puts pip in the venv.
+      - name: Set up Python "3.12"
+        run: |
+          uv python install "3.12"
+          uv venv --seed --python "3.12" "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - run: python -m pip install --upgrade pip ruff
       # The vendor tree is upstream code with upstream style; linting it would produce a diff we
       # must never apply, because a vendored file that differs from upstream for cosmetic reasons
