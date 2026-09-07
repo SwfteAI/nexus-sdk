@@ -59,7 +59,7 @@ import uuid
 
 from ._version import CONTRACT_VERSION
 from .config import TIER_FULL, TIER_HASHED, TIER_METADATA_ONLY, Config
-from .redact import MASK, redact, scan_window
+from .redact import MASK, scan_window
 
 # Epistemic classes — verbatim from nexus_devtools/events.py:32-34.
 EPISTEMIC_BEHAVIOR = "behavior_trace"

@@ -21,9 +21,7 @@ from __future__ import annotations
 
 import time
 
-import pytest
 
-import nexus
 from nexus import policy
 from nexus.policy import ed25519, settings
 from nexus.policy import envelope as env_mod

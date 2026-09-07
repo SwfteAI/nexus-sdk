@@ -33,7 +33,7 @@ from __future__ import annotations
 import pytest
 
 import nexus
-from nexus import client, config, contract
+from nexus import config, contract
 
 HUGE = "x" * 5000
 

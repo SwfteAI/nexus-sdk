@@ -22,9 +22,6 @@ import contextvars
 import typing as t
 from dataclasses import dataclass
 
-if t.TYPE_CHECKING:  # pragma: no cover
-    from .api import Run
-
 
 @dataclass(frozen=True)
 class RunRef:

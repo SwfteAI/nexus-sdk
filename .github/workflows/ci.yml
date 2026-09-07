@@ -147,8 +147,12 @@ jobs:
           uv python install "3.12"
           uv venv --seed --python "3.12" "$RUNNER_TEMP/venv"
           echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
-      - run: python -m pip install --upgrade pip ruff
-      # The vendor tree is upstream code with upstream style; linting it would produce a diff we
-      # must never apply, because a vendored file that differs from upstream for cosmetic reasons
-      # is a file nobody can re-sync.
-      - run: ruff check src tests --exclude src/nexus/vendor
+      # Pinned, not `--upgrade ruff`. An unpinned linter makes this job report on the day it ran
+      # rather than on the commit it checked: ruff's bare-invocation default rule set widened, and
+      # `master` turned red on 562 findings with no source change behind it. Bumping this pin is a
+      # deliberate act with a diff to read.
+      - run: python -m pip install --upgrade pip && python -m pip install ruff==0.16.6
+      # No `--select` and no `--exclude` here any more: both live in `[tool.ruff]` in
+      # pyproject.toml, so a developer running `ruff check` locally gets the same verdict this job
+      # does. A gate whose configuration exists only in CI is a gate nobody can reproduce.
+      - run: ruff check src tests

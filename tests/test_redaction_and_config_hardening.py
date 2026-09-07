@@ -32,7 +32,6 @@ append-mutation at all. Those were controlled against HEAD's actual file text in
 from __future__ import annotations
 
 import pathlib
-import re
 import subprocess
 import sys
 import time

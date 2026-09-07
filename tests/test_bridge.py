@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import gc
 import itertools
-import typing as t
 
 import pytest
 
