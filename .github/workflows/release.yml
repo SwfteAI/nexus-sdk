@@ -5,10 +5,19 @@ name: release
 # a version, even a deleted one. Somebody types the version they mean, and a mismatch aborts before
 # anything is built.
 #
-# RUNS ON THE SELF-HOSTED MAC. GitHub-hosted minutes are billed on private repos and this org's are
-# currently refused for non-payment; every job here would fail to start. Self-hosted minutes are
-# free and unmetered. If this repository is ever made public, these jobs move back to hosted runners
-# in the same change — a fork's pull request must never execute on the machine hosting the runner.
+# Runs on a GitHub-hosted runner. The previous version of this comment named the self-hosted Mac and
+# the condition that would end that arrangement: "if this repository is ever made public, these jobs
+# move back to hosted runners in the same change". The repository is public now, so that is an
+# operative fact rather than a future one, and hosted minutes are free and unmetered on public
+# repositories — which removes the billing reason the label existed for.
+#
+# The label was worse than undesirable, it was inoperative: no runner is registered to this
+# repository and there are no org-level runners, so dispatching this workflow queued until it
+# expired. A release workflow that cannot start is more dangerous than none, because it looks like
+# one until the day somebody needs it.
+#
+# Unlike ci.yml this workflow is `workflow_dispatch` only and never ran a fork's code, so the
+# remote-execution argument does not apply here. It is moved for the other reason.
 on:
   workflow_dispatch:
     inputs:
@@ -32,7 +41,7 @@ concurrency:
 
 jobs:
   release:
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: ${{ inputs.publish && 'pypi' || '' }}
     permissions:
@@ -47,15 +56,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # `uv`, not actions/setup-python: that action installs into a system tool cache and needs root
-      # to do it, which a self-hosted runner running as an ordinary login account cannot give it
-      # (`sudo: a password is required`). uv keeps interpreters under the user's own data directory.
-      # `--seed` puts pip in the venv, which uv otherwise omits.
-      - name: Set up Python 3.12
-        run: |
-          uv python install 3.12
-          uv venv --seed --python 3.12 "$RUNNER_TEMP/venv"
-          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+      # `actions/setup-python`, not `uv`. The objection to this action was that it installs into a
+      # system tool cache and needs root, which the self-hosted runner — an ordinary login account —
+      # could not give it (`sudo: a password is required`). That was a property of that machine, not
+      # of the action, and it does not apply on a hosted runner.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       # Before anything is built. A version that disagrees between the packaging metadata and the
       # module is a wheel whose events name a different build than the wheel does, and `sdk_version`

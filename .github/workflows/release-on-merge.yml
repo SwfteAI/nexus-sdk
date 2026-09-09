@@ -15,11 +15,12 @@ name: release-on-merge
 # publish step until a person approves. Until that is configured, the gate is the reviewed bump
 # commit plus the RELEASE_ON_MERGE repository variable below.
 #
-# RUNNER. release.yml runs on the self-hosted Mac because hosted minutes were refused on private
-# repos. This repository is no longer private (gh repo view: isPrivate=false, 2026-09-05), so
-# hosted minutes are free here and the self-hosted machine should NOT be exposed to a public repo's
-# pull requests — release.yml's own header says so. This workflow therefore uses ubuntu-latest;
-# moving release.yml and ci.yml off the self-hosted label is recommended in the same spirit.
+# RUNNER. Settled now: ci.yml and release.yml have both moved off the self-hosted label, for two
+# different reasons that are worth keeping apart. ci.yml had to move because it runs on
+# `pull_request` and this repository is public, which made the label a standing path for a fork's
+# code to execute on the machine hosting the runner. release.yml is dispatch-only and never carried
+# that risk; it moved because the label did not work at all — no runner is registered to this
+# repository and there are no org-level runners, so a dispatch queued until it expired.
 
 on:
   push:
