@@ -332,7 +332,6 @@ def test_4_10_reload_of_the_package_does_not_double_wrap(collector, monkeypatch)
     import nexus
     for _ in range(5):
         nexus.init(service="repl", env="test", version="1")
-    from nexus import client as client_mod
     threads = [t for t in threading.enumerate() if t.name == "nexus-flush"]
     assert len(threads) == 1, f"{len(threads)} flush threads after 5 inits"
     nexus.shutdown()

@@ -16,7 +16,6 @@ explains why the doubles exist rather than the real OTel SDK.
 """
 from __future__ import annotations
 
-import pytest
 
 from test_bridge import FakeSpan, bridge, genai_llm_span, llm_span, usage_events  # noqa: F401
 

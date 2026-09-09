@@ -7,7 +7,6 @@ worse than no attribution, because someone will act on it.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import threading
 import time

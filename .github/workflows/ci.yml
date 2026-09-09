@@ -1,5 +1,25 @@
 name: ci
 
+# Runs on GitHub-hosted runners. This targeted the self-hosted Mac while the repository was private,
+# because hosted minutes are billed on private repos and this org's were refused for non-payment.
+# The previous version of this comment named the condition that ends that arrangement:
+#
+#   "If this repository is ever made public, these jobs move back to hosted runners in the same
+#    change: a pull request from a fork must never execute on the machine hosting the runner."
+#
+# That is now the operative fact rather than a future one, and it is the whole reason for this
+# change. Hosted minutes are free and unmetered on PUBLIC repositories, so nothing here is billed —
+# while leaving the self-hosted label on a public repo is a standing remote-code-execution path:
+# anyone may open a pull request from a fork, and `pull_request` is a trigger below, so their code
+# would run on the machine hosting the runner.
+#
+# The label was also simply not working. No runner is registered to this repository and there are no
+# org-level runners, so every job queued until it expired.
+#
+# `actions/setup-python`, not `uv`: the objection to that action was that it installs into a system
+# tool cache and needs root, which a self-hosted runner running as an ordinary login account cannot
+# give it (`sudo: a password is required`). That is a self-hosted problem and does not apply here.
+
 on:
   push:
     branches: [master]
@@ -36,7 +56,20 @@ jobs:
       - name: Test
         # Against the installed wheel, not the source tree, so a missing package or a file left out
         # of the build fails here rather than at a customer's `pip install`.
-        run: python -m pytest -q --timeout=180
+        #
+        # `--ignore=tests/test_overhead.py`: the overhead assertions have their own job, and this is
+        # the only place they can be measured meaningfully. The `overhead` job's own comment already
+        # says the numbers are only meaningful on a box that is not simultaneously running three
+        # other test matrices — but the contamination is worse than that, because here the timing
+        # runs in a process that has already executed several hundred other tests, with their
+        # allocations, their GC pressure and their background transports still in it.
+        #
+        # The evidence is one run: `test_added_latency_per_action` passed in the dedicated job and
+        # failed in three of the four matrix jobs of the SAME commit, at 561, 451 and 422 units
+        # against a 370 budget, while 3.10 passed. A gate that reports the interpreter's luck rather
+        # than the code's cost is not measuring the code. This does NOT relax the budget: the same
+        # test, with the same numbers, still gates the build one job across.
+        run: python -m pytest -q --timeout=180 --ignore=tests/test_overhead.py
         working-directory: ${{ github.workspace }}
         env:
           PYTHONPATH: ""
@@ -64,6 +97,51 @@ jobs:
           path: overhead-latest.json
           if-no-files-found: warn
 
+  cross-sdk:
+    # The cross-SDK conformance suite lives in the Node repository (`conformance/`), and it runs
+    # from BOTH sides deliberately. It is one scripted scenario executed through both SDKs, with
+    # the emitted event streams diffed field by field and validated against the contract — so a
+    # change here that moves a wire shape away from the Node SDK's has to fail *this* build, not
+    # only the other one. An instrument that guards one direction guards nothing: the drift would
+    # simply land in whichever repository has no job for it.
+    #
+    # Skips loudly rather than silently when a sibling repository is unavailable, matching how the
+    # Node side handles the same problem.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: SwfteAI/nexus-sdk-node
+          path: .nexus-sdk-node
+          token: ${{ secrets.DEVTOOLS_READ_TOKEN }}
+        continue-on-error: true
+      - uses: actions/checkout@v4
+        with:
+          repository: SwfteAI/nexus-devtools
+          path: .nexus-devtools
+          token: ${{ secrets.DEVTOOLS_READ_TOKEN }}
+        continue-on-error: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Diff the two SDKs' emitted event streams
+        run: |
+          NODE_SDK="$PWD/.nexus-sdk-node"
+          CONTRACT="$PWD/.nexus-devtools/contract/events.v1.json"
+          if [ ! -f "$NODE_SDK/conformance/run.mjs" ] || [ ! -f "$CONTRACT" ]; then
+            echo "::warning::the Node SDK or the contract was not available; cross-SDK conformance did not run"
+            exit 0
+          fi
+          # The suite drives this checkout through `$NEXUS_PY_SDK/.venv/bin/python`.
+          python -m venv .venv
+          .venv/bin/python -m pip install -q -e .
+          cd "$NODE_SDK"
+          NEXUS_PY_SDK="$GITHUB_WORKSPACE" NEXUS_CONTRACT="$CONTRACT" node conformance/run.mjs
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -71,8 +149,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install --upgrade pip ruff
-      # The vendor tree is upstream code with upstream style; linting it would produce a diff we
-      # must never apply, because a vendored file that differs from upstream for cosmetic reasons
-      # is a file nobody can re-sync.
-      - run: ruff check src tests --exclude src/nexus/vendor
+      # Pinned, not `--upgrade ruff`. An unpinned linter makes this job report on the day it ran
+      # rather than on the commit it checked: ruff's bare-invocation default rule set widened, and
+      # `master` turned red on 562 findings with no source change behind it. Bumping this pin is a
+      # deliberate act with a diff to read.
+      - run: python -m pip install --upgrade pip && python -m pip install ruff==0.16.6
+      # No `--select` and no `--exclude` here any more: both live in `[tool.ruff]` in
+      # pyproject.toml, so a developer running `ruff check` locally gets the same verdict this job
+      # does. A gate whose configuration exists only in CI is a gate nobody can reproduce.
+      - run: ruff check src tests

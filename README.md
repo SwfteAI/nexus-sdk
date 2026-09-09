@@ -1,6 +1,11 @@
 # swfte-nexus-sdk
 
-Agent observability for services you run yourself.
+**Agent observability and enforcement for Python services you run yourself.**
+
+[![PyPI](https://img.shields.io/pypi/v/swfte-nexus-sdk.svg)](https://pypi.org/project/swfte-nexus-sdk/)
+[![Python](https://img.shields.io/pypi/pyversions/swfte-nexus-sdk.svg)](https://pypi.org/project/swfte-nexus-sdk/)
+[![Licence](https://img.shields.io/badge/licence-Apache--2.0-blue.svg)](https://github.com/SwfteAI/nexus-sdk/blob/master/LICENSE)
+[![Required dependencies](https://img.shields.io/badge/required%20dependencies-0-brightgreen.svg)](#why-no-dependencies)
 
 `nexus wrap` captures what an agent does inside a developer's terminal. This package captures the
 same thing inside your own application — the third attach point on one event ledger, stamped
@@ -12,6 +17,37 @@ pip install swfte-nexus-sdk        # import name is `nexus`
 ```
 
 Python 3.10+. **Zero required dependencies** — see [Why no dependencies](#why-no-dependencies).
+
+Part of **[Nexus by Swfte](https://www.swfte.com)** — savings, governance and a real audit trail
+for AI agents. See also the **[Node SDK](https://github.com/SwfteAI/nexus-sdk-node)**
+(`@swfte/nexus-sdk`), which emits the same events, and the
+**[terminal wrapper](https://www.npmjs.com/package/@swfte/nexus)** (`npm i -g @swfte/nexus`).
+
+---
+
+## Contents
+
+| Section | |
+|---|---|
+| [Three levels, pick one](#three-levels-pick-one) | the whole API, in increasing detail |
+| [Guarantees](#guarantees) | what this SDK promises never to do to your process |
+| [Configuration](#configuration) | every variable, the precedence rule, and the privacy tiers |
+| [Deployment shapes](#deployment-shapes) | gunicorn, uWSGI, Lambda, gevent, Kubernetes, and the rest |
+| [Why no dependencies](#why-no-dependencies) | and what is vendored instead |
+| [Status](#status) | what is implemented and what is not |
+
+**Reference documentation**
+
+| Document | For |
+|---|---|
+| [`docs/API.md`](https://github.com/SwfteAI/nexus-sdk/blob/master/docs/API.md) | every public name, its signature, and what it returns |
+| [`docs/OVERHEAD.md`](https://github.com/SwfteAI/nexus-sdk/blob/master/docs/OVERHEAD.md) | measured cost, the method, and the budgets CI enforces |
+| [`docs/RUNTIME-CASES-CHECKLIST.md`](https://github.com/SwfteAI/nexus-sdk/blob/master/docs/RUNTIME-CASES-CHECKLIST.md) | every deployment shape and its coverage status |
+| [`docs/SPECS.md`](https://github.com/SwfteAI/nexus-sdk/blob/master/docs/SPECS.md) | the internal design documents the source comments cite |
+| [`AGENTS.md`](https://github.com/SwfteAI/nexus-sdk/blob/master/AGENTS.md) | orientation for coding agents working in this repository |
+| [`CONTRIBUTING.md`](https://github.com/SwfteAI/nexus-sdk/blob/master/CONTRIBUTING.md) | how to run the suite, and what review will ask of a change |
+| [`SECURITY.md`](https://github.com/SwfteAI/nexus-sdk/blob/master/SECURITY.md) | reporting a vulnerability |
+| [`CHANGELOG.md`](https://github.com/SwfteAI/nexus-sdk/blob/master/CHANGELOG.md) | what changed in each release, and why |
 
 ---
 
@@ -84,7 +120,7 @@ combination; `init()` called twice, or ten times from a notebook cell, upgrades 
 
 Measured cost: **~19 µs** per action span, **~35 ms** to arm the SDK at startup, **~0 ms** for
 `import nexus` itself. Full numbers, method, and the budgets enforced in CI:
-[`docs/OVERHEAD.md`](docs/OVERHEAD.md).
+[`docs/OVERHEAD.md`](https://github.com/SwfteAI/nexus-sdk/blob/master/docs/OVERHEAD.md).
 
 ### The kill switch is real
 
@@ -143,6 +179,50 @@ Nothing leaves the process above the configured tier. `metadata_only` is the def
 first time an SDK ships prompt text to a collector by accident is the last time it is allowed in
 that company.
 
+## Enforcement
+
+Every agent-observability product observes. This one can **refuse**.
+
+```python
+from nexus import policy
+
+# Decide, and branch yourself. Never raises.
+d = policy.decide("tool_action", {"tool": "db.write", "target": "prod-orders"})
+if d.denied:
+    return "not allowed"
+
+# Or let the gate do it. The body never runs if an enforcing rule denies.
+with policy.gate("tool_action", {"tool": "db.write", "target": "prod-orders"}):
+    write_the_rows()
+
+policy.install(signed_envelope)      # signed, verified, versioned
+```
+
+**The decision happens before the body, not around it.** A denial raised after the write already
+went out is not enforcement, it is journalism. `gate` decides and only then yields;
+`test_enforcement.py::test_deny_lands_before_the_effect` asserts on a side-effect list that stays
+empty, and inverting the order is exactly what makes it fail.
+
+**What raises.** `Denied` is the only exception this SDK will ever put in your traceback, and you
+opted into it twice — the rule carried `enforce: true` *and* the call site did not decline.
+Everything else is contained: a bug in policy evaluation degrades to allow plus an integrity
+alert, never to a 500 in your service. `decide()` never raises at all.
+
+**Failure semantics**, which is the part that has to be exactly right:
+
+| Situation | Behaviour |
+|---|---|
+| Policy missing, unverifiable or unparseable | **allow**, and raise an integrity alert — the gap is visible, not merely survived |
+| Policy verified but stale | `enforce`-marked rules **keep denying**; unmarked rules degrade to advice |
+| Evaluation exceeds its latency budget | **allow**, and record the timeout |
+| A rule requires human approval and times out | **deny** if enforce-marked, **allow** if not |
+
+Denying because we could not reach something is never a default anywhere in this package. A cached
+deny never decays, though — otherwise disconnecting from the control plane would be the documented
+bypass.
+
+---
+
 ## Deployment shapes
 
 Gunicorn (pre-fork and `--preload`), uWSGI, uvicorn/hypercorn, celery, `multiprocessing` (fork and
@@ -151,12 +231,12 @@ Fargate, Kubernetes with a sidecar collector, `python -m`, Jupyter, and frozen b
 
 Each has a test, and where the runtime cannot be installed in CI the test drives the mechanism the
 SDK actually depends on and says so in its name.
-[`docs/RUNTIME-CASES-CHECKLIST.md`](docs/RUNTIME-CASES-CHECKLIST.md) records the status of every
+[`docs/RUNTIME-CASES-CHECKLIST.md`](https://github.com/SwfteAI/nexus-sdk/blob/master/docs/RUNTIME-CASES-CHECKLIST.md) records the status of every
 case, including the ones not covered.
 
 Comments in the source cite a few internal design documents (`DEPUTY.md`,
 `F3-SDK-RUNTIME-CASES.md`, `REPLICATION-EFFORT.md`) and a `WP-N` phase shorthand.
-[`docs/SPECS.md`](docs/SPECS.md) explains what each one is and which tests carry the
+[`docs/SPECS.md`](https://github.com/SwfteAI/nexus-sdk/blob/master/docs/SPECS.md) explains what each one is and which tests carry the
 parts that govern behaviour here.
 
 AWS Lambda needs one decorator, because the sandbox freezes between invocations and a background
@@ -177,20 +257,72 @@ The core ring declares nothing. Not `requests`, not `urllib3`, not `wrapt`.
 This is a product decision, not asceticism. An observability SDK is adopted by a team that already
 has a resolver graph they are afraid of, and a version conflict at `pip install` time is where the
 adoption conversation ends. `wrapt` and dd-trace-py's import-hook machinery are **vendored** under
-`src/nexus/vendor/` with their licences and notices carried alongside — see [`NOTICE`](NOTICE).
+`src/nexus/vendor/` with their licences and notices carried alongside — see [`NOTICE`](https://github.com/SwfteAI/nexus-sdk/blob/master/NOTICE).
 A CI job asserts the installed distribution has no required dependencies, so this cannot regress
 quietly.
 
 Optional extras: `swfte-nexus-sdk[otel]` (an OTLP bridge — HTTP/protobuf only, never gRPC, because
 `grpcio` is a C extension with fork-safety problems in exactly the pre-fork servers this SDK has to
-survive) and `swfte-nexus-sdk[integrations]`. Neither is implemented yet.
+survive) and `swfte-nexus-sdk[integrations]`.
 
-## Not here yet
+## Status
 
-Provider auto-instrumentation (WP-5), policy enforcement (WP-6), and the Node SDK (WP-7). Seams
-exist for all three — `nexus/integrations/`, `nexus/policy/`, `nexus/otel/` — and are documented
-where they sit. None is implemented, and none is stubbed in a way that pretends otherwise.
+Honest about the difference between *implemented*, *a seam*, and *not here*. Nothing in this
+package is stubbed in a way that pretends to work.
+
+| Capability | Status | Where |
+|---|---|---|
+| Capture — runs, actions, usage, outcomes | **implemented** | `nexus/api.py` |
+| Auto-attach — `nexus-run`, `sitecustomize` | **implemented** | `nexus/bootstrap/`, `nexus/auto.py` |
+| Redaction ladder and privacy tiers | **implemented** | `nexus/redact.py` |
+| Policy enforcement — a gate that can refuse | **implemented** | `nexus/policy/` |
+| Signed policy envelopes, kill switch, approvals | **implemented** | `nexus/policy/envelope.py`, `ed25519.py`, `approval.py` |
+| OTLP bridge (`[otel]` extra) | **implemented** | `nexus/otel/` |
+| Node SDK, and conformance between the two | **implemented** | [nexus-sdk-node](https://github.com/SwfteAI/nexus-sdk-node) |
+| Provider auto-instrumentation (WP-5) | **the registry, not the adapters** | `nexus/integrations/` |
+
+`nexus/integrations/` deliberately ships zero adapters. What ships is the shape an adapter must
+fit — independently versioned, its own patch/unpatch, its own tests — because that shape is what
+stops the next milestone from becoming a monolith. Adding a library must not be a core change.
+
+## The Node SDK, and staying identical to it
+
+`@swfte/nexus-sdk` (Node) instruments the same ledger, and a service written in either language has
+to be indistinguishable on the dashboard except for the language — any difference a customer can see
+is a defect, not a language quirk.
+
+That is checked rather than asserted. `nexus-sdk-node/conformance/` runs **one scripted scenario
+through both SDKs** — two interpreters of a single `scenario.json`, both posting to a stub collector
+that speaks the real ingest contract — and diffs the emitted event streams field by field, at every
+privacy tier, against each other and against the 51 `$defs` of `contract/events.v1.json`. It is
+wired into a `cross-sdk` job in **this** repository's CI as well as that one, because an instrument
+that guards one direction guards nothing: the drift simply lands in whichever repository has no job
+for it. `nexus-sdk-node/PARITY.md` §9 describes what it covers, and §3b lists every difference that
+deliberately remains, with the reason for each.
+
+Where the two are allowed to differ, they differ in *interpretation of a caller's argument* rather
+than on the wire — a bare-number watermark is epoch seconds here (`time.time()`) and epoch
+milliseconds there (`Date.now()`), because picking one would make the other language's idiomatic
+call wrong.
+
+## Nexus, beyond this package
+
+This SDK is one attach point of three. All three write the same events to the same ledger, so a
+run in production and a run on a laptop are the same shape in the same tables.
+
+| | Install | What it attaches to |
+|---|---|---|
+| **Terminal wrapper** | `npm i -g @swfte/nexus` · `pip install swfte-nexus` | coding agents in a developer's terminal — Claude Code, Codex |
+| **Python SDK** — this package | `pip install swfte-nexus-sdk` | your own Python services |
+| **[Node SDK](https://github.com/SwfteAI/nexus-sdk-node)** | `npm i @swfte/nexus-sdk` | your own Node services |
+
+- **Product, pricing and docs:** [www.swfte.com](https://www.swfte.com)
+- **Self-hosting, procurement, security review, pilots:** [sales@swfte.com](mailto:sales@swfte.com)
+- **Report a vulnerability:** [`SECURITY.md`](https://github.com/SwfteAI/nexus-sdk/blob/master/SECURITY.md)
 
 ## Licence
 
-Apache-2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+Apache-2.0. See [`LICENSE`](https://github.com/SwfteAI/nexus-sdk/blob/master/LICENSE) and [`NOTICE`](https://github.com/SwfteAI/nexus-sdk/blob/master/NOTICE) — the latter carries the attribution
+for the vendored `wrapt` and dd-trace-py import-hook machinery.
+
+Built by **[Swfte AI](https://www.swfte.com)**.

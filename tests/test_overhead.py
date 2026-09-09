@@ -47,11 +47,37 @@ import pytest
 
 from conftest import SRC, run_script
 
-# Asserted. Loose enough for a shared runner, tight enough that a synchronous send fails them.
-ACTION_P50_BUDGET_US = 40.0
-ACTION_P95_BUDGET_US = 150.0
-RUN_P50_BUDGET_US = 120.0
-RUN_P95_BUDGET_US = 600.0
+# Asserted, in units of this machine's own work rather than in microseconds -- see
+# ``_reference_us``. Tight enough that a synchronous send fails them.
+#
+# These were microsecond constants until they were shown not to survive a change of machine. A
+# microsecond is a property of the box, and the box these run on is not the box they were
+# calibrated on: the same commit measured a wall p50 of 26 us locally and 40.2, 63.3 and 89.3 us
+# in three CI runs against a 40.0 bound. The comment here used to claim these were "loose enough
+# for a shared runner"; three reds with no source change behind them is what falsifying that
+# claim looks like.
+#
+# It is not descheduling, which is the one distortion this file already defends against. CPU time
+# tracked wall time in every one of those runs (cpu/wall 1.10-1.13, above 1 because
+# ``process_time`` counts the flush worker too), so ``_assert_tail``'s quiet-machine gate never
+# disengaged -- and never could. That gate detects a process starved of CPU; this process was not
+# starved, it was doing the same work on a slower core. On Apple Silicon the children of a
+# background-priority runner daemon land on efficiency cores, which moves wall and CPU together.
+#
+# So the budget is a multiple of a reference workload measured in the same process, in the same
+# run, moments before. The assertion becomes dimensionless: one instrumented action costs no more
+# than N times this machine's unit of work. A slower machine raises the reference and the budget
+# with it; an SDK regression raises the numerator alone and still fails.
+#
+# Calibration, recorded so a later reader can tell a re-calibration from a regression: on an
+# M-series laptop the reference unit measured 0.108 us and one action cost 26.1 us, i.e. 242
+# units. The counts below are the previous microsecond budgets divided by that same 0.108 us, so
+# this change moves where the bar sits on other machines and deliberately not on the one it was
+# originally set on.
+ACTION_P50_BUDGET_UNITS = 370.0
+ACTION_P95_BUDGET_UNITS = 1390.0
+RUN_P50_BUDGET_UNITS = 1110.0
+RUN_P95_BUDGET_UNITS = 5560.0
 
 #: p99 ceiling. Applied unconditionally to CPU time, and to wall time only on a demonstrably idle
 #: machine — see ``_assert_tail``.
@@ -66,6 +92,49 @@ DISABLED_CALL_BUDGET_US = 40.0
 #: see ``docs/OVERHEAD.md`` for the breakdown. The budget carries headroom for a slower CI runner;
 #: it is a regression guard, not a target.
 ARMING_BUDGET_MS = 150.0
+
+
+class _RefObj:
+    """Deliberately the shape of the work being measured, not a tight integer loop."""
+
+    __slots__ = ("a", "b")
+
+    def __init__(self):
+        self.a = 0
+        self.b = {}
+
+
+def _ref_unit(o, d):
+    o.a += 1
+    d[o.a & 63] = o.a
+    return o.a
+
+
+#: Samples and inner repetitions for the reference measurement. Costs ~40 ms.
+_REF_SAMPLES, _REF_INNER = 2000, 200
+
+
+def _reference_us() -> float:
+    """Median cost of one unit of this machine's work, in microseconds.
+
+    An attribute increment, a dict store and a function call -- chosen because that is the shape
+    of what the SDK's hot path actually does, so a machine that is slow at this is slow at that.
+    A tight integer loop would scale with a different part of the CPU and would normalise the
+    budget against the wrong thing.
+
+    The median of 2000 samples, so a single preemption during calibration cannot deflate the
+    reference and silently tighten every budget derived from it.
+    """
+    o, d = _RefObj(), {}
+    for _ in range(_REF_INNER * 5):  # warm-up, discarded
+        _ref_unit(o, d)
+    samples = []
+    for _ in range(_REF_SAMPLES):
+        t0 = time.perf_counter_ns()
+        for _ in range(_REF_INNER):
+            _ref_unit(o, d)
+        samples.append((time.perf_counter_ns() - t0) / 1000.0 / _REF_INNER)
+    return _p(samples, 0.5)
 
 
 def _p(values, q):
@@ -166,8 +235,13 @@ def test_added_latency_per_action(offline_sdk):
     p99, cpu_p99 = _assert_tail("action", wall, cpu)
     _report("action span", p50_us=p50, p95_us=p95, p99_us=p99, cpu_p50_us=_p(cpu, 0.5),
             cpu_p99_us=cpu_p99, min_us=min(wall), mean_us=statistics.mean(wall))
-    assert p50 < ACTION_P50_BUDGET_US, f"p50 {p50:.1f}us"
-    assert p95 < ACTION_P95_BUDGET_US, f"p95 {p95:.1f}us"
+    ref = _reference_us()
+    _report("action span (normalised)", ref_unit_us=ref, p50_units=p50 / ref, p95_units=p95 / ref)
+    assert p50 / ref < ACTION_P50_BUDGET_UNITS, (
+        f"p50 {p50:.1f}us = {p50 / ref:.0f} units, budget {ACTION_P50_BUDGET_UNITS:.0f} "
+        f"(reference unit {ref:.4f}us)")
+    assert p95 / ref < ACTION_P95_BUDGET_UNITS, (
+        f"p95 {p95:.1f}us = {p95 / ref:.0f} units, budget {ACTION_P95_BUDGET_UNITS:.0f}")
 
 
 def test_added_latency_per_run(offline_sdk):
@@ -188,8 +262,13 @@ def test_added_latency_per_run(offline_sdk):
     p99, cpu_p99 = _assert_tail("run", wall, cpu)
     _report("run span (3 events)", p50_us=p50, p95_us=p95, p99_us=p99, cpu_p50_us=_p(cpu, 0.5),
             cpu_p99_us=cpu_p99, min_us=min(wall))
-    assert p50 < RUN_P50_BUDGET_US, f"p50 {p50:.1f}us"
-    assert p95 < RUN_P95_BUDGET_US, f"p95 {p95:.1f}us"
+    ref = _reference_us()
+    _report("run span (normalised)", ref_unit_us=ref, p50_units=p50 / ref, p95_units=p95 / ref)
+    assert p50 / ref < RUN_P50_BUDGET_UNITS, (
+        f"p50 {p50:.1f}us = {p50 / ref:.0f} units, budget {RUN_P50_BUDGET_UNITS:.0f} "
+        f"(reference unit {ref:.4f}us)")
+    assert p95 / ref < RUN_P95_BUDGET_UNITS, (
+        f"p95 {p95:.1f}us = {p95 / ref:.0f} units, budget {RUN_P95_BUDGET_UNITS:.0f}")
 
 
 def test_the_hot_path_never_touches_the_network(offline_sdk, monkeypatch):

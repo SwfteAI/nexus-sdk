@@ -58,7 +58,7 @@ def _workload():
 
 def _hook_names():
     # Import everything that decorates, so the registry is complete before collection.
-    import nexus
+    import nexus  # noqa: F401 — imported for the decorator side effect; see comment above
     from nexus import api, auto, client, hooks  # noqa: F401
     return sorted(_safety.HOOKS)
 

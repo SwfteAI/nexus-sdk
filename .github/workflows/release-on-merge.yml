@@ -1,0 +1,91 @@
+name: release-on-merge
+
+# Merging to master ships a release — when, and only when, `version` in pyproject.toml changes.
+# This workflow decides; release.yml does the work, exactly as if an operator had dispatched it
+# with `publish=true`, `repository=pypi` and the version typed in.
+#
+# WHY THE VERSION FIELD AND NOT THE COMMIT LOG. Sibling repositories in this estate defeat
+# conventional-commits parsers outright (cortex: 300 of 300 subjects emoji-prefixed; nexus-harness:
+# 20 of 20), and this repo's own first commit is the only conventional one it has. A parser-driven
+# release tool answers an unparseable subject with "no release" — silently. The version field
+# cannot skip and cannot duplicate; it is in the diff and reviewed as code.
+#
+# THE HUMAN GATE. This repository is PUBLIC, so the `pypi` environment CAN carry required
+# reviewers on the free plan — configure them and the dispatched release.yml run pauses at its
+# publish step until a person approves. Until that is configured, the gate is the reviewed bump
+# commit plus the RELEASE_ON_MERGE repository variable below.
+#
+# RUNNER. release.yml runs on the self-hosted Mac because hosted minutes were refused on private
+# repos. This repository is no longer private (gh repo view: isPrivate=false, 2026-09-05), so
+# hosted minutes are free here and the self-hosted machine should NOT be exposed to a public repo's
+# pull requests — release.yml's own header says so. This workflow therefore uses ubuntu-latest;
+# moving release.yml and ci.yml off the self-hosted label is recommended in the same spirit.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - pyproject.toml
+      - src/nexus/_version.py
+
+concurrency:
+  group: release-on-merge
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write # to dispatch release.yml
+
+jobs:
+  decide:
+    name: Is this merge a release?
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Decide
+        id: decide
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          base="$BEFORE"
+          case "$base" in ''|0000000000000000000000000000000000000000) base=HEAD^ ;; esac
+          python3 scripts/decide_version.py \
+            --kind pyproject --file pyproject.toml \
+            --registry pypi:swfte-nexus-sdk \
+            --base "$base"
+
+      - name: The version is the same number everywhere
+        if: steps.decide.outputs.should_release == 'true'
+        run: python3 scripts/check_versions.py
+
+      - name: Publishing must be armed
+        if: steps.decide.outputs.should_release == 'true'
+        env:
+          ARMED: ${{ vars.RELEASE_ON_MERGE }}
+        run: |
+          if [ "$ARMED" != "armed" ]; then
+            echo "::error::Version changed to ${{ steps.decide.outputs.version }} but repository variable RELEASE_ON_MERGE is not 'armed'."
+            echo "::error::Nothing was published. Red on purpose: a version bump that ships nothing is a failure, not a no-op."
+            echo "::error::Configure the PyPI trusted publisher (owner SwfteAI, repo nexus-sdk, workflow release.yml, environment pypi), then set RELEASE_ON_MERGE=armed."
+            exit 1
+          fi
+
+      - name: Dispatch release.yml with the decided version
+        if: steps.decide.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          body=$(printf '{"ref":"%s","inputs":{"publish":"true","repository":"pypi","confirm_version":"%s"}}' "$GITHUB_REF_NAME" "$VERSION")
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/dispatches" \
+            -d "$body"
+          echo "dispatched release.yml for $VERSION on $GITHUB_REF_NAME"
+          echo "### Dispatched release.yml for \`$VERSION\` → PyPI (follow it under Actions → release)" >> "$GITHUB_STEP_SUMMARY"
