@@ -56,7 +56,20 @@ jobs:
       - name: Test
         # Against the installed wheel, not the source tree, so a missing package or a file left out
         # of the build fails here rather than at a customer's `pip install`.
-        run: python -m pytest -q --timeout=180
+        #
+        # `--ignore=tests/test_overhead.py`: the overhead assertions have their own job, and this is
+        # the only place they can be measured meaningfully. The `overhead` job's own comment already
+        # says the numbers are only meaningful on a box that is not simultaneously running three
+        # other test matrices — but the contamination is worse than that, because here the timing
+        # runs in a process that has already executed several hundred other tests, with their
+        # allocations, their GC pressure and their background transports still in it.
+        #
+        # The evidence is one run: `test_added_latency_per_action` passed in the dedicated job and
+        # failed in three of the four matrix jobs of the SAME commit, at 561, 451 and 422 units
+        # against a 370 budget, while 3.10 passed. A gate that reports the interpreter's luck rather
+        # than the code's cost is not measuring the code. This does NOT relax the budget: the same
+        # test, with the same numbers, still gates the build one job across.
+        run: python -m pytest -q --timeout=180 --ignore=tests/test_overhead.py
         working-directory: ${{ github.workspace }}
         env:
           PYTHONPATH: ""
