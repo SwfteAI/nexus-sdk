@@ -82,13 +82,28 @@ jobs:
             exit 1
           fi
 
+      # `pytest-timeout` is not optional tooling here: `addopts` in pyproject.toml carries
+      # `--timeout=120`, so without the plugin pytest exits on an unrecognised argument before it
+      # collects a single test. This step installed `pytest` alone, which means the gate below could
+      # never have run. The first dispatch of this workflow that was able to start at all is the run
+      # that found it — which is the argument for dry runs, and against gates nobody has watched
+      # execute.
       - name: Install test and build tooling
-        run: python -m pip install --upgrade pytest build twine
+        run: python -m pip install --upgrade pytest pytest-timeout build twine
 
       # The suite gates the upload rather than merely preceding it. A release whose tests were not
       # run is a release nobody can describe afterwards.
+      #
+      # Two exclusions, both timing assertions, both for the same reason: they are measurements, and
+      # a measurement taken in a process that has already run several hundred other tests reports
+      # that process rather than the code. Neither is skipped — ci.yml runs the whole of
+      # `tests/test_overhead.py` in a dedicated job on its own runner, and master cannot be green
+      # without it. This job asserts the code is correct; that job asserts it is fast.
       - name: Test
-        run: python -m pytest tests/ -q --deselect tests/test_decision_latency.py::test_p99_decision_latency_is_under_the_published_cap
+        run: |
+          python -m pytest tests/ -q \
+            --ignore=tests/test_overhead.py \
+            --deselect tests/test_decision_latency.py::test_p99_decision_latency_is_under_the_published_cap
 
       - name: Build sdist and wheel
         run: python -m build
