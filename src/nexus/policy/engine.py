@@ -323,7 +323,7 @@ def decide(kind: str, subject: t.Mapping[str, t.Any], *,
 _perf = time.perf_counter
 
 
-def _decide(kind, subject, enforce, budget_ms, approval_max_s, now, t0) -> Decision:
+def _decide(kind, subject, enforce, budget_ms, approval_max_s, now, t0, *, snapshot_override=None, external_approval=False) -> Decision:
     s = settings.current()
     _incr(C_EVALUATED)
     subj = dict(subject or {})
@@ -344,7 +344,7 @@ def _decide(kind, subject, enforce, budget_ms, approval_max_s, now, t0) -> Decis
             return True
         return False
 
-    snap = _snapshot
+    snap = snapshot_override if snapshot_override is not None else _snapshot
     if not snap.present:
         # Case 6.3 / 6.5, the fail-open half. No envelope, or one that would not verify. Alerted
         # once per process: a fleet with no policy configured must not emit one alert per request.
@@ -417,6 +417,12 @@ def _decide(kind, subject, enforce, budget_ms, approval_max_s, now, t0) -> Decis
     if rule.enforcing and not s.enforcement_enabled:
         _alert_disarmed("enforcement disabled: an enforce-marked approval gate became advice")
     t_eval_end = _perf()
+    if external_approval:
+        # Isolated hosted-control snapshots cannot consult a process-local approver: its answer
+        # has no binding to this client's workspace, revision, session or proposed effect.
+        return _finish(Decision(action=rule.on_timeout, rule_id=rule.id, source='approval-unavailable',
+                                reason=rule.reason or 'approval required', enforced=may_enforce and rule.on_timeout == DENY,
+                                stale=stale, timed_out=True), t0, t_eval_end)
     return _approve(rule, subj, may_enforce, stale, s, t0, t_eval_end, approval_max_s)
 
 

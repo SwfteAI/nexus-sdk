@@ -603,3 +603,31 @@ class Transport:
             w.join(timeout=0.5)
         self._worker = None
         return ok
+
+
+def pull_control(url: str, token: str, body: dict, timeout_s: float) -> dict:
+    """Explicit prevention transport, called only by the control adapter's worker.
+
+    Refuse redirects before they can carry credentials to another authority. Use the same
+    environment-only proxy contract as telemetry transport, never the platform proxy resolver.
+    """
+    if threading.current_thread() is threading.main_thread():
+        raise RuntimeError('SDK control transport requires a background thread')
+    from urllib.parse import urlsplit
+    parsed = urlsplit(url)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment \
+            or parsed.scheme not in ('https', 'http') or parsed.path != '/api/sdk-control/poll' \
+            or (parsed.scheme == 'http' and (parsed.hostname not in ('127.0.0.1', '::1') or _effective_proxy(url))):
+        raise ValueError('SDK control transport refuses credential routing')
+    req, _ = _load_urllib()
+    class NoRedirect(req.HTTPRedirectHandler):
+        def redirect_request(self, request, fp, code, msg, headers, newurl):
+            return None
+    opener = req.build_opener(req.ProxyHandler(_proxies()), NoRedirect())
+    request = req.Request(url, data=json.dumps(body, separators=(',', ':')).encode(), method='POST',
+                          headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'Accept': 'application/json'})
+    with opener.open(request, timeout=timeout_s) as response:
+        raw = response.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024:
+            raise ValueError('SDK control response exceeds bound')
+        return json.loads(raw)
